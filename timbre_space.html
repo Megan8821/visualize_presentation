@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>音色空間 · Timbre Map (t-SNE of source-separated stems)</title>
+<style>
+  :root { --fg: #cfe8ff; --dim: #6b86a8; --accent: #7df9ff; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: #03060f; overflow: hidden; }
+  body { font-family: "SF Mono", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; color: var(--fg); }
+  #app { position: fixed; inset: 0; }
+  canvas { display: block; }
+
+  .hud { position: fixed; pointer-events: none; user-select: none; text-shadow: 0 0 8px rgba(0,0,0,.9); }
+  #title { top: 26px; left: 30px; }
+  #title h1 { font-size: 15px; font-weight: 600; letter-spacing: .28em; color: #fff; }
+  #title .sub { margin-top: 6px; font-size: 11px; letter-spacing: .12em; color: var(--dim); max-width: 48vw; line-height:1.5; }
+
+  #legend { top: 26px; right: 30px; text-align: right; font-size: 11px; line-height: 1.9; letter-spacing: .06em; pointer-events: auto; }
+  #legend .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-left: 8px; box-shadow: 0 0 10px currentColor; vertical-align: middle; }
+  #legend .lhint { font-size: 9px; letter-spacing: .14em; color: var(--dim); margin-bottom: 7px; opacity: .85; }
+  #legend .row { transition: opacity .2s, text-shadow .2s; cursor: pointer; }
+  #legend .row:hover { color: #fff; }
+  #legend .row.dim { opacity: .35; }
+  #legend .row.solo { color: #fff; text-shadow: 0 0 12px currentColor; }
+  #legend .row.all { margin-top: 7px; border-top: 1px solid rgba(255,255,255,.12); padding-top: 7px; font-size: 10px; }
+
+  #axes { bottom: 26px; left: 30px; font-size: 10px; line-height: 1.7; letter-spacing: .1em; color: var(--dim); max-width: 42vw; }
+  #axes b { color: var(--fg); font-weight: 600; }
+
+  #readout { bottom: 26px; right: 30px; text-align: right; font-size: 10px; line-height: 1.8; letter-spacing: .1em; color: var(--dim); }
+  #readout .val { color: var(--accent); font-weight: 600; }
+
+  #phase { left: 50%; bottom: 86px; transform: translateX(-50%); text-align: center; }
+  #phase .k { font-size: 10px; letter-spacing: .35em; color: var(--dim); }
+  #phase .v { margin-top: 6px; font-size: 14px; letter-spacing: .22em; color: #fff; transition: opacity .4s; }
+
+  #viewToggle { position: fixed; left: 50%; bottom: 52px; transform: translateX(-50%); z-index: 6; pointer-events: auto; cursor: pointer;
+                font-size: 10px; letter-spacing: .14em; color: var(--accent); border: 1px solid rgba(125,249,255,.4);
+                padding: 6px 14px; border-radius: 16px; background: rgba(0,0,0,.35); transition: background .2s; white-space: nowrap; }
+  #viewToggle:hover { background: rgba(125,249,255,.12); }
+
+  #bar { left: 50%; bottom: 30px; transform: translateX(-50%); width: 300px; height: 2px; background: rgba(255,255,255,.08); border-radius: 2px; overflow: hidden; }
+  #bar > i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, #4be3c0, #7df9ff, #ff7ad9); box-shadow: 0 0 12px var(--accent); }
+
+  .corner { position: fixed; width: 18px; height: 18px; border: 1px solid rgba(125,249,255,.25); pointer-events: none; }
+  .corner.tl { top: 18px; left: 18px; border-right: none; border-bottom: none; }
+  .corner.tr { top: 18px; right: 18px; border-left: none; border-bottom: none; }
+  .corner.bl { bottom: 18px; left: 18px; border-right: none; border-top: none; }
+  .corner.br { bottom: 18px; right: 18px; border-left: none; border-top: none; }
+
+  #gate { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+          background: radial-gradient(circle at 50% 45%, rgba(20,40,80,.5), #03060f 70%); z-index: 10; cursor: pointer; }
+  #gate h2 { font-size: 18px; letter-spacing: .3em; color: #fff; text-align:center; }
+  #gate p  { margin-top: 14px; font-size: 12px; letter-spacing: .1em; color: var(--dim); text-align:center; max-width: 80vw; line-height:1.7; }
+  #gate .play { margin-top: 30px; width: 76px; height: 76px; border-radius: 50%; border: 1px solid rgba(125,249,255,.5);
+                display: flex; align-items: center; justify-content: center; box-shadow: 0 0 30px rgba(125,249,255,.25); transition: transform .2s, box-shadow .2s; }
+  #gate .play:hover { transform: scale(1.06); box-shadow: 0 0 50px rgba(125,249,255,.5); }
+  #gate .play::after { content: ""; border-left: 18px solid var(--accent); border-top: 11px solid transparent; border-bottom: 11px solid transparent; margin-left: 6px; }
+  #gate .play.busy { animation: spin 1s linear infinite; border-left-color: var(--accent); }
+  #gate .play.busy::after { display:none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #gate.hidden { opacity: 0; pointer-events: none; transition: opacity .8s; }
+</style>
+</head>
+<body>
+  <div id="app"></div>
+  <div class="corner tl"></div><div class="corner tr"></div>
+  <div class="corner bl"></div><div class="corner br"></div>
+
+  <div id="title" class="hud">
+    <h1>TIMBRE&nbsp;MAP</h1>
+    <div class="sub" id="subtitle">t-SNE of source-separated stems · loading…</div>
+  </div>
+
+  <div id="legend" class="hud"></div>
+
+  <div id="axes" class="hud"><div id="axesLine">—</div></div>
+
+  <div id="readout" class="hud">
+    <div>POINTS&nbsp;&nbsp;<span class="val" id="rCount">0</span></div>
+    <div>STEM&nbsp;&nbsp;<span class="val" id="rStem">—</span></div>
+    <div>SILHOUETTE&nbsp;&nbsp;<span class="val" id="rSil">—</span></div>
+  </div>
+
+  <div id="phase" class="hud">
+    <div class="k">NOW SEPARATING</div>
+    <div class="v" id="phaseV">—</div>
+  </div>
+
+  <div id="viewToggle">◧ VIEW: t-SNE timbre map  ⇄  raw feature axes</div>
+  <div id="bar"><i></i></div>
+
+  <div id="gate">
+    <h2>音色空間 · TIMBRE MAP</h2>
+    <p id="gateMsg">REAL AUDIO → SOURCE SEPARATION → MFCC t-SNE TIMBRE MAP<br>click an instrument to solo it · toggle t-SNE ⇄ raw features</p>
+    <div class="play" id="playBtn"></div>
+  </div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass }     from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass} from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+const DATA_URL = 'web/timbre_data.json';
+let DURATION = 16.0;
+
+/* ---------------- scene ---------------- */
+const app = document.getElementById('app');
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x03060f, 0.0085);
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 600);
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.setClearColor(0x03060f, 1);
+app.appendChild(renderer.domElement);
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.95, 0.6, 0.18);
+composer.addPass(bloom);
+
+function makeSprite(){
+  const s=64, c=document.createElement('canvas'); c.width=c.height=s;
+  const g=c.getContext('2d'); const grd=g.createRadialGradient(s/2,s/2,0,s/2,s/2,s/2);
+  grd.addColorStop(0,'rgba(255,255,255,1)'); grd.addColorStop(0.25,'rgba(255,255,255,0.85)');
+  grd.addColorStop(0.55,'rgba(255,255,255,0.25)'); grd.addColorStop(1,'rgba(255,255,255,0)');
+  g.fillStyle=grd; g.fillRect(0,0,s,s);
+  const t=new THREE.CanvasTexture(c); t.needsUpdate=true; return t;
+}
+const sprite = makeSprite();
+
+(function dust(){
+  const M=1600, pos=new Float32Array(M*3);
+  for(let i=0;i<M;i++){ pos[i*3]=(Math.random()-0.5)*340; pos[i*3+1]=(Math.random()-0.5)*210; pos[i*3+2]=(Math.random()-0.5)*340; }
+  const g=new THREE.BufferGeometry(); g.setAttribute('position',new THREE.BufferAttribute(pos,3));
+  scene.add(new THREE.Points(g,new THREE.PointsMaterial({size:0.35,color:0x223a58,transparent:true,opacity:0.6,blending:THREE.AdditiveBlending,depthWrite:false,map:sprite})));
+})();
+
+/* ---------------- state ---------------- */
+let DATA=null, STEMS=[], pointMat=null, head=null, headMat=null,
+    trajCurve=null, trailGeo=null, trailMat=null, trailHist=[], TRAIL=140,
+    trajOrder=[], centT=[], centF=[], halos=[];
+let uMorph=0, morphTarget=0;   // 0 = t-SNE map, 1 = raw feature axes
+
+function curPathCentroids(){            // centroids along trajectory, lerped by morph
+  return trajOrder.map((stemIdx,k)=> centT[k].clone().lerp(centF[k], uMorph));
+}
+function curveFrom(cs){
+  const pts=[cs[0].clone().add(new THREE.Vector3(-8,-3,4)), ...cs.map(c=>c.clone()),
+             cs[cs.length-1].clone().add(new THREE.Vector3(8,4,-3))];
+  return new THREE.CatmullRomCurve3(pts,false,'catmullrom',0.5);
+}
+
+function buildPointCloud(){
+  const pts=DATA.points, N=pts.length;
+  const posT=new Float32Array(N*3), posF=new Float32Array(N*3), colors=new Float32Array(N*3),
+        sizes=new Float32Array(N), seeds=new Float32Array(N), stemId=new Float32Array(N), bright=new Float32Array(N);
+  const cols=STEMS.map(s=>new THREE.Color(s.color));
+  for(let i=0;i<N;i++){
+    const p=pts[i];                       // [tx,ty,tz, fx,fy,fz, stem, rms, bright]
+    posT[i*3]=p[0]; posT[i*3+1]=p[1]; posT[i*3+2]=p[2];
+    posF[i*3]=p[3]; posF[i*3+1]=p[4]; posF[i*3+2]=p[5];
+    const c=cols[p[6]]; colors[i*3]=c.r; colors[i*3+1]=c.g; colors[i*3+2]=c.b;
+    stemId[i]=p[6]; sizes[i]=0.8+p[7]*3.0; seeds[i]=Math.random()*Math.PI*2; bright[i]=p[8];
+  }
+  const geo=new THREE.BufferGeometry();
+  geo.setAttribute('position',new THREE.BufferAttribute(posT.slice(),3)); // required name; updated in shader via aPosT/aPosF
+  geo.setAttribute('aPosT',new THREE.BufferAttribute(posT,3));
+  geo.setAttribute('aPosF',new THREE.BufferAttribute(posF,3));
+  geo.setAttribute('color',new THREE.BufferAttribute(colors,3));
+  geo.setAttribute('aSize',new THREE.BufferAttribute(sizes,1));
+  geo.setAttribute('aSeed',new THREE.BufferAttribute(seeds,1));
+  geo.setAttribute('aStem',new THREE.BufferAttribute(stemId,1));
+  geo.setAttribute('aBright',new THREE.BufferAttribute(bright,1));
+  geo.computeBoundingSphere();
+  pointMat=new THREE.ShaderMaterial({
+    uniforms:{ uTime:{value:0}, uPR:{value:renderer.getPixelRatio()}, uTex:{value:sprite},
+               uAudio:{value:0}, uActive:{value:-1}, uActAmt:{value:0}, uMorph:{value:0} },
+    vertexShader:`
+      attribute vec3 aPosT; attribute vec3 aPosF;
+      attribute float aSize, aSeed, aStem, aBright;
+      uniform float uTime,uPR,uAudio,uActive,uActAmt,uMorph;
+      varying vec3 vColor; varying float vTw;
+      void main(){
+        vColor = color * (0.72 + 0.55*aBright);            // brighter point = higher spectral centroid
+        float tw = 0.6 + 0.4*sin(uTime*2.2+aSeed*7.0) + uAudio*0.8*max(0.0,sin(uTime*5.0+aSeed*3.0));
+        float act = (abs(aStem-uActive)<0.5) ? uActAmt : 0.0;
+        tw += act*1.1; vTw=tw;
+        vec3 pos = mix(aPosT, aPosF, uMorph);
+        vec4 mv = modelViewMatrix*vec4(pos,1.0);
+        gl_PointSize = aSize*(1.0+uAudio*0.6+act*0.8)*tw*(300.0/-mv.z)*uPR;
+        gl_Position = projectionMatrix*mv;
+      }`,
+    fragmentShader:`
+      uniform sampler2D uTex; varying vec3 vColor; varying float vTw;
+      void main(){ vec4 t=texture2D(uTex,gl_PointCoord);
+        gl_FragColor=vec4(vColor*(0.7+vTw*0.6),t.a); gl_FragColor.rgb*=t.a; }`,
+    transparent:true, depthWrite:false, blending:THREE.AdditiveBlending, vertexColors:true
+  });
+  scene.add(new THREE.Points(geo,pointMat));
+  scene.children[scene.children.length-1].frustumCulled=false;  // positions move with morph
+
+  halos = STEMS.map(s=>{
+    const m=new THREE.SpriteMaterial({map:sprite,color:new THREE.Color(s.color),transparent:true,opacity:0.16,blending:THREE.AdditiveBlending,depthWrite:false});
+    const h=new THREE.Sprite(m); h.scale.setScalar(20); scene.add(h); return h;
+  });
+}
+
+function buildTrajectory(){
+  trajOrder=DATA.trajectory;
+  centT=trajOrder.map(i=>new THREE.Vector3(...STEMS[i].centroidTsne));
+  centF=trajOrder.map(i=>new THREE.Vector3(...STEMS[i].centroidFeat));
+  trajCurve=curveFrom(curPathCentroids());
+  headMat=new THREE.SpriteMaterial({map:sprite,color:0xbff7ff,transparent:true,opacity:0.95,blending:THREE.AdditiveBlending,depthWrite:false});
+  head=new THREE.Sprite(headMat); head.scale.setScalar(4.5); scene.add(head);
+  const tp=new Float32Array(TRAIL*3);
+  trailGeo=new THREE.BufferGeometry(); trailGeo.setAttribute('position',new THREE.BufferAttribute(tp,3));
+  trailMat=new THREE.LineBasicMaterial({color:0x7df9ff,transparent:true,opacity:0.5,blending:THREE.AdditiveBlending,depthWrite:false});
+  scene.add(new THREE.Line(trailGeo,trailMat));
+}
+
+/* ---------------- audio (real stems) ---------------- */
+let actx=null, master=null, analyser=null, adata=null, stemNodes=[], audioReady=false;
+async function loadAudio(){
+  actx=new (window.AudioContext||window.webkitAudioContext)();
+  master=actx.createGain(); master.gain.value=0.0001;
+  analyser=actx.createAnalyser(); analyser.fftSize=128; adata=new Uint8Array(analyser.frequencyBinCount);
+  master.connect(analyser); master.connect(actx.destination);
+  const conv=actx.createConvolver(); const len=actx.sampleRate*1.2, ir=actx.createBuffer(2,len,actx.sampleRate);
+  for(let ch=0;ch<2;ch++){const d=ir.getChannelData(ch);for(let i=0;i<len;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/len,2.6);}
+  conv.buffer=ir; const wet=actx.createGain(); wet.gain.value=0.18; master.connect(conv); conv.connect(wet); wet.connect(actx.destination);
+  const buffers=await Promise.all(STEMS.map(async s=>{ const r=await fetch(s.audio); return actx.decodeAudioData(await r.arrayBuffer()); }));
+  stemNodes=STEMS.map((s,i)=>{ const g=actx.createGain(); g.gain.value=0; g.connect(master); return {gain:g, buffer:buffers[i]}; });
+  audioReady=true;
+  return Math.max(...buffers.map(b=>b.duration));
+}
+function startAudioPlayback(){
+  if(!audioReady) return;
+  master.gain.cancelScheduledValues(actx.currentTime);
+  master.gain.setValueAtTime(0.0001, actx.currentTime);
+  master.gain.linearRampToValueAtTime(0.9, actx.currentTime+1.2);
+  stemNodes.forEach(n=>{ const src=actx.createBufferSource(); src.buffer=n.buffer; src.loop=true; src.connect(n.gain); src.start(); n.src=src; });
+}
+
+/* ---------------- HUD ---------------- */
+const elCount=document.getElementById('rCount'), elStem=document.getElementById('rStem'),
+      elSil=document.getElementById('rSil'), barI=document.querySelector('#bar > i'),
+      phaseV=document.getElementById('phaseV'), legendEl=document.getElementById('legend'),
+      subtitle=document.getElementById('subtitle'), axesLine=document.getElementById('axesLine'),
+      viewToggle=document.getElementById('viewToggle');
+let curStem=-1, soloStem=-1;
+
+function buildLegend(){
+  const rows=STEMS.map((s,i)=>`<div class="row" data-i="${i}">${s.label} <span class="dot" style="color:${s.color}"></span></div>`).join('');
+  legendEl.innerHTML=`<div class="lhint">點樂器獨奏 · click to solo</div>`+rows+
+    `<div class="row all" data-i="-1">全部 All <span class="dot" style="color:#fff"></span></div>`;
+  legendEl.querySelectorAll('.row').forEach(r=>r.addEventListener('click',()=>setSolo(+r.dataset.i)));
+}
+function setActiveStem(s){
+  if(s===curStem) return; curStem=s; const st=STEMS[s];
+  phaseV.style.opacity=0;
+  setTimeout(()=>{ phaseV.textContent=(soloStem>=0?'SOLO · ':'')+st.label; phaseV.style.color=st.color; phaseV.style.opacity=1; },150);
+  elStem.textContent=st.name.toUpperCase();
+  legendEl.querySelectorAll('.row').forEach(r=>{const ri=+r.dataset.i; r.classList.toggle('dim', soloStem<0 && ri>=0 && ri!==s);});
+}
+function setSolo(i){
+  if(!audioReady) return;
+  soloStem=(i<0)?-1:(soloStem===i?-1:i);
+  legendEl.querySelectorAll('.row').forEach(r=>{ r.classList.toggle('solo', soloStem>=0 && (+r.dataset.i)===soloStem); if(soloStem>=0) r.classList.remove('dim'); });
+  curStem=-1;
+}
+function setAxesLabel(){
+  if(uMorph<0.5) axesLine.innerHTML = `<b>t-SNE timbre map</b> · ${DATA.axesTsne}`;
+  else axesLine.innerHTML = `RAW FEATURES — X · <b>${DATA.axesFeat.x}</b> &nbsp; Y · <b>${DATA.axesFeat.y}</b> &nbsp; Z · <b>${DATA.axesFeat.z}</b>`;
+}
+function toggleView(){
+  morphTarget = morphTarget>0.5 ? 0 : 1;
+  viewToggle.innerHTML = morphTarget>0.5 ? '◨ VIEW: raw feature axes  ⇄  t-SNE timbre map'
+                                         : '◧ VIEW: t-SNE timbre map  ⇄  raw feature axes';
+}
+viewToggle.addEventListener('click', toggleView);
+addEventListener('keydown', e=>{ if(e.key==='v'||e.key==='V') toggleView(); });
+
+/* ---------------- loop ---------------- */
+const clock=new THREE.Clock();
+let running=false, startT=0;
+const _look=new THREE.Vector3(), _ahead=new THREE.Vector3(), _camPos=new THREE.Vector3();
+const easeInOut=x=>x<0.5?4*x*x*x:1-Math.pow(-2*x+2,3)/2;
+
+function frame(){
+  requestAnimationFrame(frame);
+  const now=clock.getElapsedTime();
+  if(pointMat) pointMat.uniforms.uTime.value=now;
+
+  // morph animation
+  const prevHalf = uMorph<0.5;
+  uMorph += (morphTarget-uMorph)*0.06;
+  if(pointMat) pointMat.uniforms.uMorph.value=uMorph;
+  if((uMorph<0.5)!==prevHalf) setAxesLabel();
+
+  let level=0;
+  if(audioReady){ analyser.getByteFrequencyData(adata); for(let i=0;i<adata.length;i++) level+=adata[i]; level/=(adata.length*255); }
+  if(pointMat) pointMat.uniforms.uAudio.value += (level-pointMat.uniforms.uAudio.value)*0.2;
+
+  if(running && trajCurve){
+    let p=(now-startT)/DURATION;
+    if(p>=1){ startT=now; p=0; trailHist.length=0; }
+    const e=easeInOut(Math.min(p,1));
+
+    const cs=curPathCentroids();
+    trajCurve=curveFrom(cs);
+    halos.forEach((h,si)=>{ const k=trajOrder.indexOf(si); if(k>=0) h.position.copy(cs[k]); });
+
+    const tHead=Math.min(e,0.999);
+    trajCurve.getPointAt(tHead,_look); head.position.copy(_look);
+    trailHist.push(_look.clone()); if(trailHist.length>TRAIL) trailHist.shift();
+    const tp=trailGeo.attributes.position.array;
+    for(let i=0;i<TRAIL;i++){ const s=trailHist[Math.max(0,trailHist.length-1-i)]||_look; tp[i*3]=s.x; tp[i*3+1]=s.y; tp[i*3+2]=s.z; }
+    trailGeo.attributes.position.needsUpdate=true; trailGeo.setDrawRange(0,Math.min(trailHist.length,TRAIL));
+
+    trajCurve.getPointAt(Math.min(tHead+0.04,1),_ahead);
+    const back=_look.clone().sub(_ahead).normalize().multiplyScalar(15);
+    _camPos.copy(_look).add(back).add(new THREE.Vector3(0,6,0));
+    _camPos.x+=Math.sin(now*0.5)*3; _camPos.y+=Math.cos(now*0.4)*1.5;
+    camera.position.lerp(_camPos,0.06); camera.lookAt(_ahead.lerp(_look,0.3));
+
+    let best=0,bestD=1e9;
+    for(let k=0;k<cs.length;k++){ const d=_look.distanceTo(cs[k]); if(d<bestD){bestD=d;best=k;} }
+    const activeStem = soloStem>=0 ? soloStem : trajOrder[best];
+    setActiveStem(activeStem);
+    if(pointMat){ pointMat.uniforms.uActive.value=activeStem; pointMat.uniforms.uActAmt.value=0.6+0.4*Math.sin(now*4.0); }
+
+    if(audioReady){
+      let sum=0; const prox=cs.map(c=>Math.exp(-(_look.distanceTo(c)**2)/520)); prox.forEach(x=>sum+=x);
+      for(let k=0;k<cs.length;k++){ const idx=trajOrder[k];
+        const g = soloStem>=0 ? (idx===soloStem?0.95:0.0) : (0.12+0.95*(prox[k]/(sum||1)));
+        stemNodes[idx].gain.gain.setTargetAtTime(g, actx.currentTime, 0.08);
+      }
+    }
+    headMat.color.copy(new THREE.Color(STEMS[activeStem].color));
+    trailMat.color.copy(new THREE.Color(STEMS[activeStem].color));
+    bloom.strength=0.95+e*0.4+level*0.7;
+    barI.style.width=(p*100).toFixed(1)+'%';
+  } else {
+    const R=80; camera.position.set(Math.sin(now*0.12)*R,22+Math.sin(now*0.2)*6,Math.cos(now*0.12)*R); camera.lookAt(0,0,0);
+  }
+  composer.render();
+}
+
+function start(){
+  document.getElementById('gate').classList.add('hidden');
+  trailHist.length=0; curStem=-1; startT=clock.getElapsedTime(); running=true;
+  if(actx && actx.state==='suspended') actx.resume();
+  startAudioPlayback();
+}
+
+/* ---------------- boot ---------------- */
+const STEM_LABELS={vocals:'人聲 Vocals',piano:'鋼琴 Piano',drums:'鼓 Drums',bass:'貝斯 Bass',other:'其他 Other',guitar:'吉他 Guitar'};
+async function boot(){
+  let res;
+  try{ res=await fetch(DATA_URL); if(!res.ok) throw 0; }
+  catch(e){ subtitle.textContent='⚠ run audio_pipeline/separate_and_extract.py and serve over http';
+            document.getElementById('gateMsg').innerHTML='⚠ web/timbre_data.json not found.'; return; }
+  DATA=await res.json();
+  STEMS=DATA.stems.map(s=>({ ...s, label: STEM_LABELS[s.name]||s.name }));
+  buildLegend(); buildPointCloud(); buildTrajectory(); setAxesLabel();
+  elCount.textContent=DATA.points.length.toLocaleString();
+  elSil.textContent = (DATA.silhouette!=null? DATA.silhouette.toFixed(2) : '—');
+  subtitle.innerHTML=`${DATA.method}<br><span style="opacity:.7">${DATA.sample}</span>`;
+  frame();
+  const playBtn=document.getElementById('playBtn');
+  document.getElementById('gate').addEventListener('click', async ()=>{
+    playBtn.classList.add('busy');
+    try{ DURATION=Math.max(14, await loadAudio()); }catch(e){}
+    playBtn.classList.remove('busy'); start();
+  }, {once:true});
+}
+addEventListener('resize',()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight); composer.setSize(innerWidth,innerHeight); bloom.setSize(innerWidth,innerHeight); });
+boot();
+</script>
+</body>
+</html>
