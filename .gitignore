@@ -1,0 +1,5 @@
+# audio pipeline scratch (sample + intermediates are re-downloaded/regenerated)
+audio_pipeline/_work/
+__pycache__/
+*.pyc
+pretrained_models/
