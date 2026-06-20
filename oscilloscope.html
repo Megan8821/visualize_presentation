@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Oscilloscope</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;}
+  body{background:#07090d;color:#dfe3ea;font-family:'Helvetica Neue',Arial,sans-serif;padding:20px;}
+  h1{font-size:15px;letter-spacing:3px;text-transform:uppercase;font-weight:700;margin-bottom:2px;color:#34e0c4;}
+  .sub{font-size:12px;opacity:.5;margin-bottom:16px;}
+  .scope{position:relative;background:#0a0f12;border:1px solid rgba(52,224,196,.18);border-radius:12px;overflow:hidden;}
+  canvas{display:block;width:100%;}
+  .read{position:absolute;top:10px;left:14px;font-size:12px;letter-spacing:1px;color:#34e0c4;opacity:.85;}
+  .ctl{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:16px;}
+  button.play{background:#34e0c4;color:#06121a;border:none;border-radius:8px;padding:9px 18px;font-weight:700;font-size:13px;cursor:pointer;}
+  .wbtn{border:1px solid rgba(255,255,255,.15);background:rgba(255,255,255,.03);color:#cfd4dc;border-radius:18px;
+        padding:6px 13px;font-size:12px;cursor:pointer;transition:.15s;text-transform:capitalize;}
+  .wbtn:hover{border-color:rgba(255,255,255,.45);}
+  .wbtn.active{background:#34e0c4;color:#06121a;border-color:transparent;font-weight:700;}
+  .grp{display:flex;align-items:center;gap:8px;}
+  .lbl{font-size:10px;letter-spacing:1px;text-transform:uppercase;opacity:.45;}
+  input[type=range]{-webkit-appearance:none;appearance:none;width:160px;height:4px;background:rgba(255,255,255,.18);border-radius:4px;outline:none;cursor:pointer;}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;height:14px;border-radius:50%;background:#34e0c4;cursor:pointer;box-shadow:0 0 8px rgba(52,224,196,.8);}
+  input[type=range]::-moz-range-thumb{width:14px;height:14px;border:none;border-radius:50%;background:#34e0c4;cursor:pointer;box-shadow:0 0 8px rgba(52,224,196,.8);}
+  .val{font-size:12px;min-width:62px;}
+</style>
+</head>
+<body>
+  <h1>Oscilloscope</h1>
+  <div class="sub">A single continuous tone, repeating forever. The display is trigger-locked so each cycle of the 波動 stays still.</div>
+
+  <div class="scope">
+    <canvas id="cv"></canvas>
+    <div class="read" id="read">&mdash;</div>
+  </div>
+
+  <div class="ctl">
+    <button class="play" id="playBtn">&#9654; Start</button>
+    <div class="grp" id="wgroup"></div>
+    <div class="grp"><span class="lbl">Freq</span><input type="range" id="freq" min="40" max="800" value="220"><span class="val" id="freqVal">220 Hz</span></div>
+    <div class="grp"><span class="lbl">Cycles</span><input type="range" id="cyc" min="1" max="8" value="3" step="1"><span class="val" id="cycVal">3</span></div>
+  </div>
+
+<script>
+(function(){
+  "use strict";
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  let ctx=null, osc=null, gain=null, analyser=null, buf=null, running=false;
+  let freq=220, wtype='sine', cycles=3;
+  const WAVES=['sine','square','sawtooth','triangle'];
+
+  const cv=document.getElementById('cv'), c2d=cv.getContext('2d');
+  const dpr=Math.min(window.devicePixelRatio||1,2);
+  let W=0,H=0;
+  function resize(){ W=cv.parentElement.clientWidth; H=Math.round(clamp(W*0.42,220,420));
+    cv.style.height=H+'px'; cv.width=W*dpr; cv.height=H*dpr; c2d.setTransform(dpr,0,0,dpr,0,0); }
+  window.addEventListener('resize',resize);
+
+  function start(){ const AC=window.AudioContext||window.webkitAudioContext; ctx=ctx||new AC(); ctx.resume(); if(running) return;
+    osc=ctx.createOscillator(); osc.type=wtype; osc.frequency.value=freq;
+    gain=ctx.createGain(); gain.gain.value=0.12;
+    analyser=ctx.createAnalyser(); analyser.fftSize=4096; buf=new Float32Array(analyser.fftSize);
+    osc.connect(gain); gain.connect(analyser); analyser.connect(ctx.destination); osc.start(); running=true;
+    document.getElementById('playBtn').innerHTML='&#9632; Stop'; }
+  function stop(){ if(osc){ try{osc.stop();osc.disconnect();}catch(e){} osc=null; } running=false; document.getElementById('playBtn').innerHTML='&#9654; Start'; }
+
+  function grid(){ c2d.clearRect(0,0,W,H); c2d.fillStyle='#0a0f12'; c2d.fillRect(0,0,W,H);
+    c2d.strokeStyle='rgba(52,224,196,.08)'; c2d.lineWidth=1;
+    for(let i=1;i<10;i++){ const x=W*i/10; c2d.beginPath(); c2d.moveTo(x,0); c2d.lineTo(x,H); c2d.stroke(); }
+    for(let i=1;i<6;i++){ const y=H*i/6; c2d.beginPath(); c2d.moveTo(0,y); c2d.lineTo(W,y); c2d.stroke(); }
+    c2d.strokeStyle='rgba(52,224,196,.22)'; c2d.beginPath(); c2d.moveTo(0,H/2); c2d.lineTo(W,H/2); c2d.stroke(); }
+
+  function draw(){
+    grid();
+    if(running && analyser){
+      analyser.getFloatTimeDomainData(buf);
+      const sr=ctx.sampleRate;
+      const show=clamp(Math.round(sr/freq*cycles),64,buf.length-2);
+      // trigger: first rising zero-crossing, leaving room for `show` samples
+      let t0=0; for(let i=1;i<buf.length-show;i++){ if(buf[i-1]<0 && buf[i]>=0){ t0=i; break; } }
+      c2d.strokeStyle='#34e0c4'; c2d.lineWidth=2; c2d.lineJoin='round'; c2d.shadowBlur=12; c2d.shadowColor='#34e0c4';
+      c2d.beginPath();
+      for(let i=0;i<show;i++){ const x=i/(show-1)*W, y=H/2 - buf[t0+i]*H*0.42; if(i===0)c2d.moveTo(x,y); else c2d.lineTo(x,y); }
+      c2d.stroke(); c2d.shadowBlur=0;
+      document.getElementById('read').textContent=wtype+'  \u00b7  '+freq+' Hz  \u00b7  '+cycles+' cycles  \u00b7  period '+(1000/freq).toFixed(2)+' ms';
+    } else {
+      c2d.strokeStyle='rgba(52,224,196,.4)'; c2d.lineWidth=2; c2d.beginPath(); c2d.moveTo(0,H/2); c2d.lineTo(W,H/2); c2d.stroke();
+      document.getElementById('read').textContent='press Start';
+    }
+    requestAnimationFrame(draw);
+  }
+
+  // waveform buttons
+  const wg=document.getElementById('wgroup');
+  WAVES.forEach(w=>{ const b=document.createElement('button'); b.className='wbtn'+(w===wtype?' active':''); b.textContent=w; b.dataset.w=w;
+    b.onclick=()=>{ wtype=w; if(osc)osc.type=w; [...wg.children].forEach(c=>c.classList.toggle('active',c.dataset.w===w)); }; wg.appendChild(b); });
+
+  document.getElementById('playBtn').onclick=()=>{ if(running) stop(); else start(); };
+  const fEl=document.getElementById('freq'),fV=document.getElementById('freqVal');
+  fEl.oninput=()=>{ freq=parseInt(fEl.value,10); fV.textContent=freq+' Hz'; if(osc)osc.frequency.setTargetAtTime(freq,ctx.currentTime,0.01); };
+  const cEl=document.getElementById('cyc'),cV=document.getElementById('cycVal');
+  cEl.oninput=()=>{ cycles=parseInt(cEl.value,10); cV.textContent=cycles; };
+
+  resize(); requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>
