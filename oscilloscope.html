@@ -39,7 +39,7 @@
     <button class="play" id="playBtn">&#9654; Start</button>
     <div class="grp" id="wgroup"></div>
     <div class="grp"><span class="lbl">Freq</span><input type="range" id="freq" min="40" max="800" value="220"><span class="val" id="freqVal">220 Hz</span></div>
-    <div class="grp"><span class="lbl">Cycles</span><input type="range" id="cyc" min="1" max="8" value="3" step="1"><span class="val" id="cycVal">3</span></div>
+    <div class="grp"><span class="lbl">Window</span><input type="range" id="win" min="5" max="50" value="20" step="1"><span class="val" id="winVal">20 ms</span></div>
   </div>
 
 <script>
@@ -47,7 +47,7 @@
   "use strict";
   const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
   let ctx=null, osc=null, gain=null, analyser=null, buf=null, running=false;
-  let freq=220, wtype='sine', cycles=3;
+  let freq=220, wtype='sine', winMs=20;
   const WAVES=['sine','square','sawtooth','triangle'];
 
   const cv=document.getElementById('cv'), c2d=cv.getContext('2d');
@@ -76,14 +76,16 @@
     if(running && analyser){
       analyser.getFloatTimeDomainData(buf);
       const sr=ctx.sampleRate;
-      const show=clamp(Math.round(sr/freq*cycles),64,buf.length-2);
+      // Fixed time window (ms) -> fixed sample span, independent of frequency.
+      // Higher pitch packs more cycles into the same window.
+      const show=clamp(Math.round(sr*winMs/1000),64,buf.length-2);
       // trigger: first rising zero-crossing, leaving room for `show` samples
       let t0=0; for(let i=1;i<buf.length-show;i++){ if(buf[i-1]<0 && buf[i]>=0){ t0=i; break; } }
       c2d.strokeStyle='#34e0c4'; c2d.lineWidth=2; c2d.lineJoin='round'; c2d.shadowBlur=12; c2d.shadowColor='#34e0c4';
       c2d.beginPath();
       for(let i=0;i<show;i++){ const x=i/(show-1)*W, y=H/2 - buf[t0+i]*H*0.42; if(i===0)c2d.moveTo(x,y); else c2d.lineTo(x,y); }
       c2d.stroke(); c2d.shadowBlur=0;
-      document.getElementById('read').textContent=wtype+'  \u00b7  '+freq+' Hz  \u00b7  '+cycles+' cycles  \u00b7  period '+(1000/freq).toFixed(2)+' ms';
+      document.getElementById('read').textContent=wtype+'  \u00b7  '+freq+' Hz  \u00b7  '+winMs+' ms window  \u00b7  period '+(1000/freq).toFixed(2)+' ms';
     } else {
       c2d.strokeStyle='rgba(52,224,196,.4)'; c2d.lineWidth=2; c2d.beginPath(); c2d.moveTo(0,H/2); c2d.lineTo(W,H/2); c2d.stroke();
       document.getElementById('read').textContent='press Start';
@@ -99,8 +101,8 @@
   document.getElementById('playBtn').onclick=()=>{ if(running) stop(); else start(); };
   const fEl=document.getElementById('freq'),fV=document.getElementById('freqVal');
   fEl.oninput=()=>{ freq=parseInt(fEl.value,10); fV.textContent=freq+' Hz'; if(osc)osc.frequency.setTargetAtTime(freq,ctx.currentTime,0.01); };
-  const cEl=document.getElementById('cyc'),cV=document.getElementById('cycVal');
-  cEl.oninput=()=>{ cycles=parseInt(cEl.value,10); cV.textContent=cycles; };
+  const cEl=document.getElementById('win'),cV=document.getElementById('winVal');
+  cEl.oninput=()=>{ winMs=parseInt(cEl.value,10); cV.textContent=winMs+' ms'; };
 
   resize(); requestAnimationFrame(draw);
 })();
