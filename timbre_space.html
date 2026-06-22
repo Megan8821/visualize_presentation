@@ -32,14 +32,16 @@
   #readout { bottom: 26px; right: 30px; text-align: right; font-size: 10px; line-height: 1.8; letter-spacing: .1em; color: var(--dim); }
   #readout .val { color: var(--accent); font-weight: 600; }
 
-  #phase { left: 50%; bottom: 86px; transform: translateX(-50%); text-align: center; }
+  #phase { left: 50%; bottom: 112px; transform: translateX(-50%); text-align: center; }
   #phase .k { font-size: 10px; letter-spacing: .35em; color: var(--dim); }
   #phase .v { margin-top: 6px; font-size: 14px; letter-spacing: .22em; color: #fff; transition: opacity .4s; }
 
-  #viewToggle { position: fixed; left: 50%; bottom: 52px; transform: translateX(-50%); z-index: 6; pointer-events: auto; cursor: pointer;
+  #viewToggle, #camToggle { position: fixed; left: 50%; transform: translateX(-50%); z-index: 6; pointer-events: auto; cursor: pointer;
                 font-size: 10px; letter-spacing: .14em; color: var(--accent); border: 1px solid rgba(125,249,255,.4);
                 padding: 6px 14px; border-radius: 16px; background: rgba(0,0,0,.35); transition: background .2s; white-space: nowrap; }
-  #viewToggle:hover { background: rgba(125,249,255,.12); }
+  #camToggle { bottom: 78px; }
+  #viewToggle { bottom: 52px; }
+  #viewToggle:hover, #camToggle:hover { background: rgba(125,249,255,.12); }
 
   #bar { left: 50%; bottom: 30px; transform: translateX(-50%); width: 300px; height: 2px; background: rgba(255,255,255,.08); border-radius: 2px; overflow: hidden; }
   #bar > i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, #4be3c0, #7df9ff, #ff7ad9); box-shadow: 0 0 12px var(--accent); }
@@ -89,12 +91,13 @@
     <div class="v" id="phaseV">—</div>
   </div>
 
+  <div id="camToggle">◉ CAMERA: orbit overview  ⇄  fly-through</div>
   <div id="viewToggle">◧ VIEW: t-SNE timbre map  ⇄  raw feature axes</div>
   <div id="bar"><i></i></div>
 
   <div id="gate">
     <h2>音色空間 · TIMBRE MAP</h2>
-    <p id="gateMsg">REAL AUDIO → SOURCE SEPARATION → MFCC t-SNE TIMBRE MAP<br>click an instrument to solo it · toggle t-SNE ⇄ raw features</p>
+    <p id="gateMsg">REAL AUDIO → SOURCE SEPARATION → MFCC t-SNE TIMBRE MAP<br>each blob = one instrument · closer points sound more alike<br>click an instrument to solo · O = orbit ⇄ fly-through · V = t-SNE ⇄ raw features</p>
     <div class="play" id="playBtn"></div>
   </div>
 
@@ -139,6 +142,18 @@ function makeSprite(){
 }
 const sprite = makeSprite();
 
+function makeLabel(text,color){
+  const fs=44, pad=10, c=document.createElement('canvas'), g=c.getContext('2d');
+  const font=`600 ${fs}px ui-monospace,Menlo,Consolas,monospace`;
+  g.font=font; const w=Math.ceil(g.measureText(text).width);
+  c.width=w+pad*2; c.height=fs+pad*2;
+  g.font=font; g.textBaseline='middle'; g.shadowColor=color; g.shadowBlur=14;
+  g.fillStyle=color; g.fillText(text,pad,c.height/2);
+  const tex=new THREE.CanvasTexture(c); tex.needsUpdate=true;
+  const m=new THREE.SpriteMaterial({map:tex,transparent:true,opacity:0.92,depthWrite:false,depthTest:false});
+  const s=new THREE.Sprite(m); const h=7; s.scale.set(h*c.width/c.height,h,1); return s;
+}
+
 (function dust(){
   const M=1600, pos=new Float32Array(M*3);
   for(let i=0;i<M;i++){ pos[i*3]=(Math.random()-0.5)*340; pos[i*3+1]=(Math.random()-0.5)*210; pos[i*3+2]=(Math.random()-0.5)*340; }
@@ -151,6 +166,8 @@ let DATA=null, STEMS=[], pointMat=null, head=null, headMat=null,
     trajCurve=null, trailGeo=null, trailMat=null, trailHist=[], TRAIL=140,
     trajOrder=[], centT=[], centF=[], halos=[];
 let uMorph=0, morphTarget=0;   // 0 = t-SNE map, 1 = raw feature axes
+let labels=[], cloudRadius=80, cloudCenter=new THREE.Vector3();
+let camMode='overview';        // 'overview' = steady orbit (read clusters) · 'tour' = fly-through
 
 function curPathCentroids(){            // centroids along trajectory, lerped by morph
   return trajOrder.map((stemIdx,k)=> centT[k].clone().lerp(centF[k], uMorph));
@@ -183,6 +200,7 @@ function buildPointCloud(){
   geo.setAttribute('aStem',new THREE.BufferAttribute(stemId,1));
   geo.setAttribute('aBright',new THREE.BufferAttribute(bright,1));
   geo.computeBoundingSphere();
+  if(geo.boundingSphere){ cloudRadius=geo.boundingSphere.radius; cloudCenter.copy(geo.boundingSphere.center); }
   pointMat=new THREE.ShaderMaterial({
     uniforms:{ uTime:{value:0}, uPR:{value:renderer.getPixelRatio()}, uTex:{value:sprite},
                uAudio:{value:0}, uActive:{value:-1}, uActAmt:{value:0}, uMorph:{value:0} },
@@ -227,6 +245,10 @@ function buildTrajectory(){
   trailGeo=new THREE.BufferGeometry(); trailGeo.setAttribute('position',new THREE.BufferAttribute(tp,3));
   trailMat=new THREE.LineBasicMaterial({color:0x7df9ff,transparent:true,opacity:0.5,blending:THREE.AdditiveBlending,depthWrite:false});
   scene.add(new THREE.Line(trailGeo,trailMat));
+
+  // cluster name labels, parked at each instrument's centroid so the blobs are readable
+  labels = STEMS.map((s,i)=>{ const l=makeLabel(s.name.toUpperCase(), s.color);
+    l.position.copy(new THREE.Vector3(...s.centroidTsne)); scene.add(l); return l; });
 }
 
 /* ---------------- audio (real stems) ---------------- */
@@ -289,7 +311,15 @@ function toggleView(){
                                          : '◧ VIEW: t-SNE timbre map  ⇄  raw feature axes';
 }
 viewToggle.addEventListener('click', toggleView);
-addEventListener('keydown', e=>{ if(e.key==='v'||e.key==='V') toggleView(); });
+const camToggle=document.getElementById('camToggle');
+function toggleCam(){
+  camMode = camMode==='overview' ? 'tour' : 'overview';
+  camToggle.innerHTML = camMode==='overview' ? '◉ CAMERA: orbit overview  ⇄  fly-through'
+                                             : '✈ CAMERA: fly-through  ⇄  orbit overview';
+}
+camToggle.addEventListener('click', toggleCam);
+addEventListener('keydown', e=>{ if(e.key==='v'||e.key==='V') toggleView();
+  else if(e.key==='o'||e.key==='O'||e.key==='c'||e.key==='C') toggleCam(); });
 
 /* ---------------- loop ---------------- */
 const clock=new THREE.Clock();
@@ -317,9 +347,11 @@ function frame(){
     if(p>=1){ startT=now; p=0; trailHist.length=0; }
     const e=easeInOut(Math.min(p,1));
 
+    // ---- playhead: always advances, drives audio + active-cluster highlight ----
     const cs=curPathCentroids();
     trajCurve=curveFrom(cs);
     halos.forEach((h,si)=>{ const k=trajOrder.indexOf(si); if(k>=0) h.position.copy(cs[k]); });
+    labels.forEach((l,si)=>{ const k=trajOrder.indexOf(si); if(k>=0){ l.position.copy(cs[k]); l.position.y+=4; } });
 
     const tHead=Math.min(e,0.999);
     trajCurve.getPointAt(tHead,_look); head.position.copy(_look);
@@ -328,11 +360,17 @@ function frame(){
     for(let i=0;i<TRAIL;i++){ const s=trailHist[Math.max(0,trailHist.length-1-i)]||_look; tp[i*3]=s.x; tp[i*3+1]=s.y; tp[i*3+2]=s.z; }
     trailGeo.attributes.position.needsUpdate=true; trailGeo.setDrawRange(0,Math.min(trailHist.length,TRAIL));
 
-    trajCurve.getPointAt(Math.min(tHead+0.04,1),_ahead);
-    const back=_look.clone().sub(_ahead).normalize().multiplyScalar(15);
-    _camPos.copy(_look).add(back).add(new THREE.Vector3(0,6,0));
-    _camPos.x+=Math.sin(now*0.5)*3; _camPos.y+=Math.cos(now*0.4)*1.5;
-    camera.position.lerp(_camPos,0.06); camera.lookAt(_ahead.lerp(_look,0.3));
+    // ---- camera: overview = steady orbit (read clusters) · tour = fly-through ----
+    if(camMode==='tour'){
+      trajCurve.getPointAt(Math.min(tHead+0.04,1),_ahead);
+      const back=_look.clone().sub(_ahead).normalize().multiplyScalar(16);
+      _camPos.copy(_look).add(back).add(new THREE.Vector3(0,7,0));
+      camera.position.lerp(_camPos,0.05); camera.lookAt(_ahead.lerp(_look,0.3));
+    } else {
+      const R=cloudRadius*2.3;
+      _camPos.set(cloudCenter.x+Math.sin(now*0.08)*R, cloudCenter.y+cloudRadius*0.55, cloudCenter.z+Math.cos(now*0.08)*R);
+      camera.position.lerp(_camPos,0.04); camera.lookAt(cloudCenter);
+    }
 
     let best=0,bestD=1e9;
     for(let k=0;k<cs.length;k++){ const d=_look.distanceTo(cs[k]); if(d<bestD){bestD=d;best=k;} }
@@ -349,10 +387,10 @@ function frame(){
     }
     headMat.color.copy(new THREE.Color(STEMS[activeStem].color));
     trailMat.color.copy(new THREE.Color(STEMS[activeStem].color));
-    bloom.strength=0.95+e*0.4+level*0.7;
+    bloom.strength=(camMode==='tour'?0.9:0.6)+e*0.3+level*0.6;
     barI.style.width=(p*100).toFixed(1)+'%';
   } else {
-    const R=80; camera.position.set(Math.sin(now*0.12)*R,22+Math.sin(now*0.2)*6,Math.cos(now*0.12)*R); camera.lookAt(0,0,0);
+    const R=cloudRadius*2.3; camera.position.set(cloudCenter.x+Math.sin(now*0.1)*R, cloudCenter.y+cloudRadius*0.5, cloudCenter.z+Math.cos(now*0.1)*R); camera.lookAt(cloudCenter);
   }
   composer.render();
 }
