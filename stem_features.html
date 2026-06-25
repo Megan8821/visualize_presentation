@@ -114,16 +114,20 @@
 
   // ---- pitch detection: windowed autocorrelation over the plausible range ----
   function detectPitch(buf, sr){
-    let rms=0; for(let i=0;i<buf.length;i++) rms+=buf[i]*buf[i]; rms=Math.sqrt(rms/buf.length);
-    if(rms<0.006) return 0;               // too quiet / unvoiced
     const minLag=Math.floor(sr/1000), maxLag=Math.floor(sr/60);   // 60..1000 Hz
     const Wc=Math.min(1024, buf.length-maxLag-1);
+    let r0=0; for(let i=0;i<Wc;i++) r0+=buf[i]*buf[i];            // window energy (R at lag 0)
+    if(Math.sqrt(r0/Wc)<0.006) return 0;  // too quiet / unvoiced
     let bestLag=-1, best=0; const corr=new Float32Array(maxLag+2);
     for(let lag=minLag; lag<=maxLag; lag++){
       let sum=0; for(let i=0;i<Wc;i++) sum+=buf[i]*buf[i+lag];
       corr[lag]=sum; if(sum>best){ best=sum; bestLag=lag; }
     }
-    if(bestLag<minLag+1 || best<=0) return 0;
+    if(bestLag<minLag+1 || best<=0 || r0<=0) return 0;
+    // periodicity confidence: normalised cross-correlation at the peak (0..1, amplitude-invariant).
+    // Tones are strongly periodic (≈0.9+); drums/cymbals are noise-like (low) → reject.
+    let rl=0; for(let i=0;i<Wc;i++){ const v=buf[i+bestLag]; rl+=v*v; }
+    if(rl<=0 || best/Math.sqrt(r0*rl) < 0.8) return 0;
     // parabolic interpolation around the peak
     const x1=corr[bestLag-1], x2=corr[bestLag], x3=corr[bestLag+1]||0;
     const a=(x1+x3-2*x2), b=(x3-x1)/2; let lag=bestLag; if(a) lag=bestLag - b/a;
