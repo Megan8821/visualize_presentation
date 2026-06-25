@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>樂器特徵分析 · Stem Feature Scope</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;}
+  html,body{height:100%;background:#06080d;color:#dfe3ea;overflow:hidden;
+    font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace;}
+  #cv{display:block;width:100%;height:100%;}
+  .hud{position:fixed;pointer-events:none;user-select:none;}
+  #title{top:16px;left:20px;}
+  #title h1{font-size:13px;letter-spacing:.26em;font-weight:700;color:#fff;}
+  #title .sub{margin-top:4px;font-size:10px;letter-spacing:.1em;color:#5f7798;}
+  #pause{position:fixed;top:16px;right:20px;z-index:6;pointer-events:auto;cursor:pointer;
+    font-size:10px;letter-spacing:.12em;color:#34e0c4;border:1px solid rgba(52,224,196,.4);
+    padding:6px 14px;border-radius:16px;background:rgba(0,0,0,.35);transition:.2s;}
+  #pause:hover{background:rgba(52,224,196,.12);}
+  #gate{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    background:radial-gradient(circle at 50% 45%,rgba(20,40,70,.5),#06080d 70%);z-index:10;cursor:pointer;text-align:center;}
+  #gate h2{font-size:17px;letter-spacing:.28em;color:#fff;}
+  #gate p{margin-top:14px;font-size:11px;letter-spacing:.08em;color:#5f7798;max-width:80vw;line-height:1.8;}
+  #gate .play{margin-top:28px;width:72px;height:72px;border-radius:50%;border:1px solid rgba(52,224,196,.5);
+    display:flex;align-items:center;justify-content:center;box-shadow:0 0 30px rgba(52,224,196,.25);transition:.2s;}
+  #gate .play:hover{transform:scale(1.06);box-shadow:0 0 50px rgba(52,224,196,.5);}
+  #gate .play::after{content:"";border-left:17px solid #34e0c4;border-top:11px solid transparent;border-bottom:11px solid transparent;margin-left:5px;}
+  #gate .play.busy{animation:spin 1s linear infinite;border-left-color:#34e0c4;}
+  #gate .play.busy::after{display:none;}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  #gate.hidden{opacity:0;pointer-events:none;transition:opacity .7s;}
+</style>
+</head>
+<body>
+  <canvas id="cv"></canvas>
+  <div id="title" class="hud">
+    <h1>STEM&nbsp;FEATURE&nbsp;SCOPE</h1>
+    <div class="sub" id="sub">5 separated instruments · real-time low-level features</div>
+  </div>
+  <div id="pause">❚❚ PAUSE</div>
+
+  <div id="gate">
+    <h2>樂器特徵分析 · FEATURE SCOPE</h2>
+    <p>同一首歌的五個樂器同步播放,即時拆解各自的低階聲學特徵。<br>
+       Why do instruments sound different? Watch their low-level features.<br>
+       click an instrument name to mute it · click PAUSE to freeze</p>
+    <div class="play" id="playBtn"></div>
+  </div>
+
+<script>
+(function(){
+  "use strict";
+  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+  const log2=x=>Math.log(x)/Math.LN2;
+
+  // ---- stems (colour + audio matches the timbre map) ----
+  const STEMS=[
+    {name:'vocals', label:'VOCALS', color:'#ff5e9c'},
+    {name:'piano',  label:'PIANO',  color:'#5be0ff'},
+    {name:'drums',  label:'DRUMS',  color:'#ffb347'},
+    {name:'bass',   label:'BASS',   color:'#9b7bff'},
+    {name:'other',  label:'OTHER',  color:'#7cff8a'},
+  ];
+  // ---- feature rows (top to bottom). weight = relative height ----
+  const ROWS=[
+    {key:'spectrum',label:'SPECTRUM',   sublabel:'magnitude vs freq', type:'bars', weight:2.0},
+    {key:'rms',     label:'RMS',        sublabel:'loudness',          type:'line', weight:1.0, base:'bottom'},
+    {key:'pitch',   label:'PITCH',      sublabel:'fundamental f0',    type:'line', weight:1.0, base:'full'},
+    {key:'vibrato', label:'VIBRATO',    sublabel:'f0 wobble (cents)', type:'line', weight:1.0, base:'center'},
+    {key:'flux',    label:'SPEC FLUX',  sublabel:'rate of change',    type:'line', weight:1.0, base:'bottom'},
+    {key:'zcr',     label:'ZCR',        sublabel:'zero-cross rate',   type:'line', weight:1.0, base:'bottom'},
+  ];
+  const HL=200;            // history length per scrolling feature
+
+  const cv=document.getElementById('cv'), g=cv.getContext('2d');
+  const dpr=Math.min(window.devicePixelRatio||1,2);
+  let W=0,H=0;
+  function resize(){ W=window.innerWidth; H=window.innerHeight;
+    cv.width=W*dpr; cv.height=H*dpr; g.setTransform(dpr,0,0,dpr,0,0); }
+  window.addEventListener('resize',resize); resize();
+
+  // ---- audio state ----
+  let ctx=null, master=null, ready=false, started=false, paused=false;
+  const S=STEMS.map(s=>({
+    ...s, analyser:null, gain:null, src:null, buffer:null, muted:false,
+    freq:null, time:null, prevMag:null, fluxMax:1e-6,
+    hist:{rms:[],pitch:[],vibrato:[],flux:[],zcr:[]},   // normalised 0..1 (NaN = gap)
+    pitchRaw:[], meanPitch:0,                            // Hz, for vibrato stats
+    cur:{rms:0,pitch:0,vibExtent:0,vibRate:0,flux:0,zcr:0},
+  }));
+  S.forEach(s=>{ for(let i=0;i<HL;i++){ ['rms','pitch','vibrato','flux','zcr'].forEach(k=>s.hist[k].push(NaN)); } });
+
+  async function loadAudio(){
+    const AC=window.AudioContext||window.webkitAudioContext; ctx=new AC();
+    master=ctx.createGain(); master.gain.value=0.9; master.connect(ctx.destination);
+    await Promise.all(S.map(async s=>{
+      const r=await fetch('web/audio/'+s.name+'.ogg');
+      s.buffer=await ctx.decodeAudioData(await r.arrayBuffer());
+      s.analyser=ctx.createAnalyser(); s.analyser.fftSize=2048; s.analyser.smoothingTimeConstant=0.5;
+      s.freq=new Uint8Array(s.analyser.frequencyBinCount);
+      s.time=new Float32Array(s.analyser.fftSize);
+      s.prevMag=new Float32Array(s.analyser.frequencyBinCount);
+      s.gain=ctx.createGain(); s.gain.value=1;
+      s.gain.connect(s.analyser); s.analyser.connect(master);
+    }));
+    ready=true;
+  }
+  function play(){
+    if(!ready||started) return; started=true;
+    const t0=ctx.currentTime+0.12;        // start all stems together → stay in sync
+    S.forEach(s=>{ const src=ctx.createBufferSource(); src.buffer=s.buffer; src.loop=true;
+      src.connect(s.gain); src.start(t0); s.src=src; });
+  }
+
+  // ---- pitch detection: windowed autocorrelation over the plausible range ----
+  function detectPitch(buf, sr){
+    let rms=0; for(let i=0;i<buf.length;i++) rms+=buf[i]*buf[i]; rms=Math.sqrt(rms/buf.length);
+    if(rms<0.006) return 0;               // too quiet / unvoiced
+    const minLag=Math.floor(sr/1000), maxLag=Math.floor(sr/60);   // 60..1000 Hz
+    const Wc=Math.min(1024, buf.length-maxLag-1);
+    let bestLag=-1, best=0; const corr=new Float32Array(maxLag+2);
+    for(let lag=minLag; lag<=maxLag; lag++){
+      let sum=0; for(let i=0;i<Wc;i++) sum+=buf[i]*buf[i+lag];
+      corr[lag]=sum; if(sum>best){ best=sum; bestLag=lag; }
+    }
+    if(bestLag<minLag+1 || best<=0) return 0;
+    // parabolic interpolation around the peak
+    const x1=corr[bestLag-1], x2=corr[bestLag], x3=corr[bestLag+1]||0;
+    const a=(x1+x3-2*x2), b=(x3-x1)/2; let lag=bestLag; if(a) lag=bestLag - b/a;
+    return sr/lag;
+  }
+
+  function analyse(s, dt){
+    s.analyser.getByteFrequencyData(s.freq);
+    s.analyser.getFloatTimeDomainData(s.time);
+    const N=s.time.length, sr=ctx.sampleRate, freq=s.freq, nb=freq.length;
+
+    // RMS
+    let rms=0; for(let i=0;i<N;i++) rms+=s.time[i]*s.time[i]; rms=Math.sqrt(rms/N);
+    // ZCR
+    let zc=0; for(let i=1;i<N;i++){ if((s.time[i-1]<0)!==(s.time[i]<0)) zc++; } const zcr=zc/(N-1);
+    // Spectral flux (positive change of normalised magnitude vs previous frame)
+    let flux=0; for(let i=0;i<nb;i++){ const m=freq[i]/255; const d=m-s.prevMag[i]; if(d>0) flux+=d; s.prevMag[i]=m; }
+    s.fluxMax=Math.max(s.fluxMax*0.995, flux, 1e-6);
+    // Pitch
+    const pitch=detectPitch(s.time, sr);
+    // running mean pitch + vibrato stats over recent voiced history
+    s.pitchRaw.push(pitch); if(s.pitchRaw.length>HL) s.pitchRaw.shift();
+    const voiced=[]; for(let i=s.pitchRaw.length-1;i>=0 && voiced.length<70;i--){ const p=s.pitchRaw[i]; if(p>0) voiced.push(p); }
+    let vibExtent=0, vibRate=0, mean=0, devCents=NaN;
+    if(voiced.length>=12){
+      for(const p of voiced) mean+=p; mean/=voiced.length;
+      let mn=1e9,mx=-1e9; const cents=voiced.map(p=>{const c=1200*log2(p/mean); mn=Math.min(mn,c); mx=Math.max(mx,c); return c;});
+      vibExtent=(mx-mn)/2;
+      let crossings=0; for(let i=1;i<cents.length;i++){ if((cents[i-1]<0)!==(cents[i]<0)) crossings++; }
+      const winSec=voiced.length*dt; if(winSec>0) vibRate=(crossings/2)/winSec;
+      s.meanPitch=mean;
+      if(pitch>0) devCents=1200*log2(pitch/mean);
+    }
+
+    // push normalised histories
+    pushHist(s.hist.rms, clamp(rms/0.35,0,1));
+    pushHist(s.hist.pitch, pitch>0 ? clamp((log2(pitch)-log2(60))/(log2(1000)-log2(60)),0,1) : NaN);
+    pushHist(s.hist.vibrato, isNaN(devCents)? NaN : clamp(0.5+devCents/120,0,1));   // ±60 cents → full height
+    pushHist(s.hist.flux, clamp(flux/s.fluxMax,0,1));
+    pushHist(s.hist.zcr, clamp(zcr/0.3,0,1));
+
+    s.cur.rms=rms; s.cur.pitch=pitch; s.cur.vibExtent=vibExtent; s.cur.vibRate=vibRate; s.cur.flux=flux; s.cur.zcr=zcr;
+  }
+  function pushHist(arr,v){ arr.push(v); if(arr.length>HL) arr.shift(); }
+
+  // ---- layout ----
+  const LG=104, TH=58, PADR=18, PADB=16, GAP=8;
+  function colRect(ci){ const gw=W-LG-PADR; const cw=gw/STEMS.length; return {x:LG+ci*cw, w:cw}; }
+  let rowYs=[];
+  function computeRows(){
+    const gh=H-TH-PADB; let tot=0; ROWS.forEach(r=>tot+=r.weight);
+    let y=TH; rowYs=ROWS.map(r=>{ const h=gh*r.weight/tot; const rect={y, h}; y+=h; return rect; });
+  }
+
+  // ---- drawing ----
+  function drawLine(x,y,w,h,arr,color,base){
+    g.fillStyle='rgba(255,255,255,.02)'; g.fillRect(x,y,w,h);
+    // baseline
+    g.strokeStyle='rgba(255,255,255,.07)'; g.lineWidth=1; g.beginPath();
+    const by = base==='center'? y+h/2 : y+h-1; g.moveTo(x,by); g.lineTo(x+w,by); g.stroke();
+    g.strokeStyle=color; g.lineWidth=1.6; g.lineJoin='round'; g.shadowBlur=6; g.shadowColor=color;
+    g.beginPath(); let pen=false;
+    for(let i=0;i<arr.length;i++){ const v=arr[i];
+      if(isNaN(v)){ pen=false; continue; }
+      const px=x + (i/(HL-1))*w, py=y + (1-v)*(h-2) + 1;
+      if(!pen){ g.moveTo(px,py); pen=true; } else g.lineTo(px,py);
+    }
+    g.stroke(); g.shadowBlur=0;
+  }
+  function drawBars(x,y,w,h,freq,color){
+    g.fillStyle='rgba(255,255,255,.02)'; g.fillRect(x,y,w,h);
+    const B=52, nb=freq.length; const minBin=1, maxBin=nb;
+    g.fillStyle=color;
+    for(let b=0;b<B;b++){
+      const f0=Math.exp(Math.log(minBin)+(Math.log(maxBin)-Math.log(minBin))*b/B);
+      const f1=Math.exp(Math.log(minBin)+(Math.log(maxBin)-Math.log(minBin))*(b+1)/B);
+      let a=0,n=0; for(let i=Math.floor(f0);i<Math.max(Math.floor(f0)+1,Math.floor(f1));i++){ if(i<nb){ a+=freq[i]; n++; } }
+      const m=(n?a/n:0)/255; const bh=m*(h-3);
+      const bx=x + (b/B)*w, bw=(w/B)*0.8;
+      g.globalAlpha=0.35+0.65*m; g.fillRect(bx, y+h-bh, bw, bh);
+    }
+    g.globalAlpha=1;
+  }
+
+  function frame(now){
+    requestAnimationFrame(frame);
+    const dt = frame._last? clamp((now-frame._last)/1000,0.001,0.1) : 0.016; frame._last=now;
+
+    if(ready && started && !paused){ for(const s of S) analyse(s, dt); }
+
+    g.clearRect(0,0,W,H); g.fillStyle='#06080d'; g.fillRect(0,0,W,H);
+    computeRows();
+
+    // instrument headers
+    g.textBaseline='middle';
+    STEMS.forEach((st,ci)=>{ const c=colRect(ci); const cx=c.x+c.w/2;
+      const s=S[ci]; g.globalAlpha=s.muted?0.3:1;
+      g.fillStyle=st.color; g.font='700 13px ui-monospace,monospace'; g.textAlign='center';
+      g.shadowBlur=s.muted?0:8; g.shadowColor=st.color; g.fillText(st.label, cx, TH-34); g.shadowBlur=0;
+      g.fillStyle=s.muted?'#5f7798':'rgba(223,227,234,.5)'; g.font='9px ui-monospace,monospace';
+      g.fillText(s.muted?'muted · click to unmute':'click to mute', cx, TH-18);
+      g.globalAlpha=1;
+      if(ci>0){ g.strokeStyle='rgba(255,255,255,.05)'; g.beginPath(); g.moveTo(c.x,TH-2); g.lineTo(c.x,H-PADB); g.stroke(); }
+    });
+
+    // rows
+    ROWS.forEach((r,ri)=>{
+      const ry=rowYs[ri];
+      // left label
+      g.textAlign='left'; g.fillStyle='#aeb8c6'; g.font='600 11px ui-monospace,monospace';
+      g.fillText(r.label, 14, ry.y+13);
+      g.fillStyle='#5f7798'; g.font='8px ui-monospace,monospace';
+      g.fillText(r.sublabel, 14, ry.y+27);
+      // separator
+      g.strokeStyle='rgba(255,255,255,.05)'; g.beginPath(); g.moveTo(14,ry.y-GAP/2); g.lineTo(W-PADR,ry.y-GAP/2); g.stroke();
+
+      STEMS.forEach((st,ci)=>{
+        const c=colRect(ci); const s=S[ci];
+        const x=c.x+GAP, y=ry.y+GAP, w=c.w-GAP*1.5, h=ry.h-GAP*1.5;
+        g.globalAlpha=s.muted?0.28:1;
+        if(r.type==='bars') drawBars(x,y,w,h,s.freq,st.color);
+        else drawLine(x,y,w,h,s.hist[r.key],st.color,r.base);
+        // readout value
+        g.globalAlpha=s.muted?0.4:0.95; g.textAlign='right'; g.fillStyle=st.color; g.font='10px ui-monospace,monospace';
+        g.fillText(fmt(r.key,s.cur), x+w-3, y+10);
+        g.globalAlpha=1;
+      });
+    });
+
+    if(!started){ g.textAlign='center'; g.fillStyle='#5f7798'; g.font='11px ui-monospace,monospace';
+      g.fillText('press play to begin', W/2, H/2); }
+  }
+  function fmt(key,cur){
+    switch(key){
+      case 'rms': return cur.rms.toFixed(3);
+      case 'pitch': return cur.pitch>0 ? Math.round(cur.pitch)+' Hz' : '—';
+      case 'vibrato': return cur.vibExtent>3 ? '±'+Math.round(cur.vibExtent)+'c '+cur.vibRate.toFixed(1)+'Hz' : '—';
+      case 'flux': return cur.flux.toFixed(1);
+      case 'zcr': return cur.zcr.toFixed(3);
+      default: return '';
+    }
+  }
+
+  // ---- interaction ----
+  cv.addEventListener('click',e=>{
+    if(!started) return;
+    if(e.clientY > TH-2) return;          // only the header band toggles mute
+    STEMS.forEach((st,ci)=>{ const c=colRect(ci); if(e.clientX>=c.x && e.clientX<c.x+c.w){
+      const s=S[ci]; s.muted=!s.muted; if(s.gain) s.gain.gain.setTargetAtTime(s.muted?0:1, ctx.currentTime, 0.02); } });
+  });
+  const pauseBtn=document.getElementById('pause');
+  pauseBtn.addEventListener('click',()=>{ if(!started) return; paused=!paused;
+    if(paused){ ctx.suspend(); pauseBtn.textContent='▶ RESUME'; } else { ctx.resume(); pauseBtn.textContent='❚❚ PAUSE'; } });
+
+  // ---- boot ----
+  const playBtn=document.getElementById('playBtn');
+  document.getElementById('gate').addEventListener('click', async ()=>{
+    playBtn.classList.add('busy');
+    try{ await loadAudio(); }
+    catch(err){ document.querySelector('#gate p').innerHTML='⚠ could not load stems from web/audio/ — serve over http(s).'; playBtn.classList.remove('busy'); return; }
+    playBtn.classList.remove('busy');
+    document.getElementById('gate').classList.add('hidden');
+    play();
+  }, {once:true});
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
