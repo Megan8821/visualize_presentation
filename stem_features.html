@@ -43,7 +43,7 @@
     <h2>樂器特徵分析 · FEATURE SCOPE</h2>
     <p>同一首歌的五個樂器同步播放,即時拆解各自的低階聲學特徵。<br>
        Why do instruments sound different? Watch their low-level features.<br>
-       click an instrument name to mute it · click PAUSE to freeze</p>
+       click an instrument name to mute it · press <b>space</b> (or PAUSE) to freeze &amp; read the values</p>
     <div class="play" id="playBtn"></div>
   </div>
 
@@ -255,6 +255,15 @@
 
     if(!started){ g.textAlign='center'; g.fillStyle='#5f7798'; g.font='11px ui-monospace,monospace';
       g.fillText('press play to begin', W/2, H/2); }
+
+    // frozen-frame indicator so it's obvious the values are held still for reading
+    if(paused){
+      g.textAlign='center'; g.textBaseline='middle';
+      g.fillStyle='rgba(52,224,196,.9)'; g.font='700 12px ui-monospace,monospace';
+      g.shadowBlur=10; g.shadowColor='#34e0c4';
+      g.fillText('● FROZEN — read the values · space / RESUME to continue', W/2, TH-46);
+      g.shadowBlur=0;
+    }
   }
   function fmt(key,cur){
     switch(key){
@@ -275,8 +284,10 @@
       const s=S[ci]; s.muted=!s.muted; if(s.gain) s.gain.gain.setTargetAtTime(s.muted?0:1, ctx.currentTime, 0.02); } });
   });
   const pauseBtn=document.getElementById('pause');
-  pauseBtn.addEventListener('click',()=>{ if(!started) return; paused=!paused;
-    if(paused){ ctx.suspend(); pauseBtn.textContent='▶ RESUME'; } else { ctx.resume(); pauseBtn.textContent='❚❚ PAUSE'; } });
+  function togglePause(){ if(!started) return; paused=!paused;
+    if(paused){ ctx.suspend(); pauseBtn.textContent='▶ RESUME'; } else { ctx.resume(); pauseBtn.textContent='❚❚ PAUSE'; } }
+  pauseBtn.addEventListener('click',togglePause);
+  window.addEventListener('keydown',e=>{ if(e.code==='Space'||e.key===' '){ e.preventDefault(); togglePause(); } });
 
   // ---- boot ----
   const playBtn=document.getElementById('playBtn');
